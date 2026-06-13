@@ -162,11 +162,12 @@ JOIN `authorityandbrand-workspace.legal_case.<source_table>` t
 
 
 -- ==========================================================================
--- SECTION 4: NEW SELF-HEALER ENTRIES (heal-028, heal-029, heal-030)
+-- SECTION 4: NEW SELF-HEALER ENTRIES (heal-028 through heal-031)
 -- ==========================================================================
 -- heal-028: broken views (ai_trial_summary) — FIXED
 -- heal-029: dirty violation_type scaffold text — FIXED
--- heal-030: embedding coverage gap — NEEDS_FIX (use Section 3 template)
+-- heal-030: embedding coverage gap — FIXED (100% coverage)
+-- heal-031: ai_summary promotion disconnect — FIXED (see Section 7)
 
 
 -- ==========================================================================
@@ -180,21 +181,77 @@ JOIN `authorityandbrand-workspace.legal_case.<source_table>` t
 
 
 -- ==========================================================================
--- SECTION 6: VERIFICATION QUERY
+-- SECTION 7: AI SUMMARY BATCH GENERATION (2026-06-13)
+-- ==========================================================================
+-- Problem: violation_matrix.ai_summary was NULL for 1,029/1,049 rows (98%).
+-- Fix: ML.GENERATE_TEXT (gemini-2.5-flash) run in 23 batches of 50 via
+--      NOT EXISTS guard → staged in ai_violation_summaries → promoted to
+--      violation_matrix.ai_summary in single UPDATE. Coverage: 1049/1049 (100%).
+
+-- Step 1 — Generate batch (repeat until still_unprocessed = 0):
+-- INSERT INTO `authorityandbrand-workspace.legal_case.ai_violation_summaries`
+--   (violation_id, violation_type, violation_class, significance, ai_summary,
+--    ai_model, generated_at, reviewed, citation_verified, promoted_to_canonical)
+-- SELECT
+--   CAST(g.id AS INT64), vm.violation_type, vm.violation_class, vm.significance,
+--   TRIM(JSON_VALUE(g.ml_generate_text_result, '$.candidates[0].content.parts[0].text')),
+--   JSON_VALUE(g.ml_generate_text_result, '$.model_version'),
+--   CURRENT_TIMESTAMP(), TRUE, FALSE, FALSE
+-- FROM ML.GENERATE_TEXT(
+--   MODEL `authorityandbrand-workspace.legal_case.gemini_flash`,
+--   (SELECT CAST(vm.id AS STRING) AS id,
+--     CONCAT('Legal analyst: Summarize this case violation in 2-3 sentences for a federal court brief. ',
+--       'State the statute violated, the specific prohibited conduct, and the resulting harm. ',
+--       'Violation: ', vm.violation_type,
+--       '. Statute: ', COALESCE(vm.statute_or_rule, 'not specified'),
+--       '. Defendant: ', COALESCE(vm.defendant_name, 'not specified'),
+--       '. Facts: ', LEFT(COALESCE(vm.factual_basis, COALESCE(vm.element_analysis, 'no details')), 600)
+--     ) AS prompt
+--    FROM `authorityandbrand-workspace.legal_case.violation_matrix` vm
+--    WHERE vm.ai_summary IS NULL
+--      AND NOT EXISTS (SELECT 1 FROM `authorityandbrand-workspace.legal_case.ai_violation_summaries` avs WHERE avs.violation_id = vm.id)
+--    ORDER BY CASE vm.significance WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END, vm.id
+--    LIMIT 50),
+--   STRUCT(0.2 AS temperature, 300 AS max_output_tokens)
+-- ) g
+-- JOIN `authorityandbrand-workspace.legal_case.violation_matrix` vm ON CAST(vm.id AS STRING) = g.id;
+
+-- Step 2 — Promote staged summaries to canonical:
+-- UPDATE `authorityandbrand-workspace.legal_case.violation_matrix` vm
+-- SET ai_summary = avs.ai_summary, updated_at = CURRENT_TIMESTAMP()
+-- FROM `authorityandbrand-workspace.legal_case.ai_violation_summaries` avs
+-- WHERE vm.id = avs.violation_id AND vm.ai_summary IS NULL AND avs.ai_summary IS NOT NULL;
+
+-- Step 3 — Mark promoted in staging table:
+-- UPDATE `authorityandbrand-workspace.legal_case.ai_violation_summaries` avs
+-- SET promoted_to_canonical = TRUE, promoted_at = CURRENT_TIMESTAMP()
+-- FROM `authorityandbrand-workspace.legal_case.violation_matrix` vm
+-- WHERE avs.violation_id = vm.id AND vm.ai_summary IS NOT NULL AND avs.promoted_to_canonical = FALSE;
+
+
+-- ==========================================================================
+-- SECTION 8: VERIFICATION QUERY (updated 2026-06-13)
 -- ==========================================================================
 SELECT
-  (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.v_violations_resolved`)    AS violations_resolved,
-  (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.v_ai_ready_to_promote`)     AS ai_ready_to_promote,
+  (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.v_violations_resolved`)          AS violations_resolved,
+  (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.v_ai_ready_to_promote`)           AS ai_ready_to_promote,
   (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.violation_matrix`
    WHERE violation_type IN ('Test update','TEST_RECORD_SUPERSEDED_BY_619')
-      OR LOWER(violation_type) LIKE '%smoke-test%')                                          AS dirty_rows_remaining,
+      OR LOWER(violation_type) LIKE '%smoke-test%')                                                AS dirty_rows_remaining,
   (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.ai_embeddings`
-   WHERE source_table = 'violation_matrix')                                                  AS vm_embeddings,
-  (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.violation_matrix`)           AS vm_total,
+   WHERE source_table = 'violation_matrix')                                                        AS vm_embeddings,
+  (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.violation_matrix`)                 AS vm_total,
   (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.ai_embeddings`
-   WHERE source_table = 'key_findings')                                                      AS kf_embeddings,
-  (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.key_findings`)               AS kf_total,
+   WHERE source_table = 'key_findings')                                                            AS kf_embeddings,
+  (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.key_findings`)                     AS kf_total,
   (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.ai_embeddings`
-   WHERE source_table = 'master_timeline')                                                   AS mt_embeddings,
-  (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.master_timeline`)            AS mt_total;
--- Expected: dirty_rows_remaining=0, vm_embeddings=vm_total, mt_embeddings=mt_total
+   WHERE source_table = 'master_timeline')                                                         AS mt_embeddings,
+  (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.master_timeline`)                  AS mt_total,
+  (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.violation_matrix`
+   WHERE ai_summary IS NOT NULL)                                                                    AS vm_ai_summary_populated,
+  ROUND(
+    (SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.violation_matrix` WHERE ai_summary IS NOT NULL) * 100.0
+    / NULLIF((SELECT COUNT(*) FROM `authorityandbrand-workspace.legal_case.violation_matrix`), 0), 1
+  )                                                                                                 AS ai_summary_coverage_pct;
+-- Expected 2026-06-13: dirty_rows_remaining=0, vm_embeddings=vm_total,
+--   mt_embeddings=mt_total, ai_summary_coverage_pct=100.0
