@@ -7,6 +7,7 @@ Usage: uv run train.py
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TORCH_LOGS"] = ""  # suppress torch.compile/inductor verbose logging
 
 import gc
 import math
@@ -486,10 +487,8 @@ model.to_empty(device=device)
 model.init_weights()
 
 param_counts = model.num_scaling_params()
-print("Parameter counts:")
-for key, value in param_counts.items():
-    print(f"  {key:24s}: {value:,}")
 num_params = param_counts['total']
+print(f"Params: {num_params/1e6:.1f}M | matrix={param_counts['transformer_matrices']/1e6:.1f}M emb={param_counts['wte']/1e6:.1f}M ve={param_counts['value_embeds']/1e6:.1f}M head={param_counts['lm_head']/1e6:.1f}M")
 num_flops_per_token = model.estimate_flops()
 print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 

@@ -8,10 +8,16 @@ To set up a new experiment, work with the user to:
 
 1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar5`). The branch `autoresearch/<tag>` must not already exist — this is a fresh run.
 2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
-3. **Read the in-scope files**: The repo is small. Read these files for full context:
-   - `README.md` — repository context.
-   - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
-   - `train.py` — the file you modify. Model architecture, optimizer, training loop.
+3. **Read `train.py`**: This is the only file you need to read. Do NOT read `README.md` (8 KB, human-facing), `prepare.py` (15 KB — key facts are inlined below), or `uv.lock` (443 KB — **never open this file**).
+
+   **Key constants and API from `prepare.py`** (these are fixed — do not modify `prepare.py`):
+   - `MAX_SEQ_LEN = 2048` — sequence/context length
+   - `TIME_BUDGET = 300` — wall-clock training budget in seconds
+   - `VOCAB_SIZE = 8192` — tokenizer vocabulary size
+   - `evaluate_bpb(model, tokenizer, batch_size)` — ground-truth eval metric; DO NOT MODIFY
+   - `make_dataloader(tokenizer, B, T, split)` — call with `split="train"` or `"val"`
+   - `Tokenizer.from_directory()` — loads the pre-trained tokenizer from `~/.cache/autoresearch/`
+
 4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
 5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
 6. **Confirm and go**: Confirm setup looks good.
@@ -35,6 +41,8 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 **VRAM** is a soft constraint. Some increase is acceptable for meaningful val_bpb gains, but it should not blow up dramatically.
 
 **Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_bpb improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
+
+**Session length**: Conversation context accumulates with each experiment. After ~50 experiments in one session, responses slow and context approaches its limit. At that point, start a fresh Claude session on the same branch, re-read `train.py`, and continue — the git history and `results.tsv` preserve all work.
 
 **The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
 
