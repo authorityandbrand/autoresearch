@@ -7,6 +7,7 @@ Usage: uv run train.py
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TORCH_LOGS"] = ""  # suppress torch.compile/inductor verbose logging
 
 import gc
 import math
@@ -449,6 +450,7 @@ FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 # Model size
 DEPTH = 8               # number of transformer layers
 DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
+LOG_INTERVAL = 10       # print a training log line every N steps
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -485,10 +487,8 @@ model.to_empty(device=device)
 model.init_weights()
 
 param_counts = model.num_scaling_params()
-print("Parameter counts:")
-for key, value in param_counts.items():
-    print(f"  {key:24s}: {value:,}")
 num_params = param_counts['total']
+print(f"Params: {num_params/1e6:.1f}M | matrix={param_counts['transformer_matrices']/1e6:.1f}M emb={param_counts['wte']/1e6:.1f}M ve={param_counts['value_embeds']/1e6:.1f}M head={param_counts['lm_head']/1e6:.1f}M")
 num_flops_per_token = model.estimate_flops()
 print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 
@@ -587,7 +587,8 @@ while True:
     mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
     remaining = max(0, TIME_BUDGET - total_training_time)
 
-    print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
+    if step % LOG_INTERVAL == 0:
+        print(f"step {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s")
 
     # GC management (Python's GC causes ~500ms stalls)
     if step == 0:
@@ -603,7 +604,7 @@ while True:
     if step > 10 and total_training_time >= TIME_BUDGET:
         break
 
-print()  # newline after \r training log
+print()  # blank line before summary
 
 total_tokens = step * TOTAL_BATCH_SIZE
 
